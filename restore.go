@@ -38,6 +38,10 @@ using the runc checkpoint command.`,
 			Usage: "allow open tcp connections",
 		},
 		cli.BoolFlag{
+			Name:  "tcp-skip-in-flight",
+			Usage: "skip in-flight tcp connections",
+		},
+		cli.BoolFlag{
 			Name:  "ext-unix-sk",
 			Usage: "allow external unix sockets",
 		},
@@ -58,6 +62,11 @@ using the runc checkpoint command.`,
 			Name:  "bundle, b",
 			Value: "",
 			Usage: "path to the root of the bundle directory",
+		},
+		cli.StringFlag{
+			Name:  "config, c",
+			Value: "",
+			Usage: `path to a config file, which overrides the default config.json in the specified bundle directory`,
 		},
 		cli.BoolFlag{
 			Name:  "detach,d",
