@@ -127,20 +127,20 @@ function teardown() {
 	[ "${lines[0]}" = "410" ]
 }
 
-@test "runc run [runc-dmz]" {
-	runc --debug run test_hello
+@test "RUNC_DMZ=true runc run [runc-dmz]" {
+	RUNC_DMZ=true runc --debug run test_hello
 	[ "$status" -eq 0 ]
 	[[ "$output" = *"Hello World"* ]]
 	# We use runc-dmz if we can.
 	[[ "$output" = *"runc-dmz: using runc-dmz"* ]]
 }
 
-@test "runc run [cap_sys_ptrace -> /proc/self/exe clone]" {
+@test "RUNC_DMZ=true runc run [cap_sys_ptrace -> /proc/self/exe clone]" {
 	# Add CAP_SYS_PTRACE to the bounding set, the minimum needed to indicate a
 	# container process _could_ get CAP_SYS_PTRACE.
 	update_config '.process.capabilities.bounding += ["CAP_SYS_PTRACE"]'
 
-	runc --debug run test_hello
+	RUNC_DMZ=true runc --debug run test_hello
 	[ "$status" -eq 0 ]
 	[[ "$output" = *"Hello World"* ]]
 	if [ "$EUID" -ne 0 ] && is_kernel_gte 4.10; then
@@ -154,8 +154,8 @@ function teardown() {
 	fi
 }
 
-@test "RUNC_DMZ=legacy runc run [/proc/self/exe clone]" {
-	RUNC_DMZ=legacy runc --debug run test_hello
+@test "runc run [/proc/self/exe clone]" {
+	runc --debug run test_hello
 	[ "$status" -eq 0 ]
 	[[ "$output" = *"Hello World"* ]]
 	[[ "$output" = *"runc-dmz: using /proc/self/exe clone"* ]]
@@ -229,4 +229,37 @@ function teardown() {
 	runc exec attached_ctr cat /proc/self/timens_offsets
 	grep -E '^monotonic\s+7881\s+2718281$' <<<"$output"
 	grep -E '^boottime\s+1337\s+3141519$' <<<"$output"
+}
+
+@test "RUNC_DMZ=true runc run [exec error]" {
+	cat <<EOF >rootfs/run.sh
+#!/mmnnttbb foo bar
+sh
+EOF
+	chmod +x rootfs/run.sh
+	update_config '.process.args = [ "/run.sh" ]'
+	RUNC_DMZ=true runc run test_hello
+
+	# Ensure that the output contains the right error message. For runc-dmz, both
+	# nolibc and libc have the same formatting string (but libc will print the
+	# errno description rather than just the number), and for runc_nodmz the error
+	# message from Go starts with the same string.
+	[ "$status" -ne 0 ]
+	[[ "$output" = *"exec /run.sh: "* ]]
+}
+
+@test "runc run [execve error]" {
+	cat <<EOF >rootfs/run.sh
+#!/mmnnttbb foo bar
+sh
+EOF
+	chmod +x rootfs/run.sh
+	update_config '.process.args = [ "/run.sh" ]'
+	runc run test_hello
+	[ "$status" -ne 0 ]
+
+	# After the sync socket closed, we should not send error to parent
+	# process, or else we will get a unnecessary error log(#4171).
+	[ ${#lines[@]} -eq 1 ]
+	[[ ${lines[0]} = "exec /run.sh: no such file or directory" ]]
 }

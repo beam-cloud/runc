@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
@@ -15,6 +14,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/keys"
 	"github.com/opencontainers/runc/libcontainer/seccomp"
 	"github.com/opencontainers/runc/libcontainer/system"
+	"github.com/opencontainers/runc/libcontainer/utils"
 )
 
 // linuxSetnsInit performs the container's initialization for running a new process
@@ -24,7 +24,7 @@ type linuxSetnsInit struct {
 	consoleSocket *os.File
 	pidfdSocket   *os.File
 	config        *initConfig
-	logFd         int
+	logPipe       *os.File
 	dmzExe        *os.File
 }
 
@@ -129,15 +129,38 @@ func (l *linuxSetnsInit) Init() error {
 		}
 	}
 
+	// Close the pipe to signal that we have completed our init.
+	// Please keep this because we don't want to get a pipe write error if
+	// there is an error from `execve` after all fds closed.
+	_ = l.pipe.Close()
+
 	// Close the log pipe fd so the parent's ForwardLogs can exit.
 	logrus.Debugf("setns_init: about to exec")
-	if err := unix.Close(l.logFd); err != nil {
-		return &os.PathError{Op: "close log pipe", Path: "fd " + strconv.Itoa(l.logFd), Err: err}
+	if err := l.logPipe.Close(); err != nil {
+		return fmt.Errorf("close log pipe: %w", err)
 	}
 
 	if l.dmzExe != nil {
 		l.config.Args[0] = name
 		return system.Fexecve(l.dmzExe.Fd(), l.config.Args, os.Environ())
+	}
+	// Close all file descriptors we are not passing to the container. This is
+	// necessary because the execve target could use internal runc fds as the
+	// execve path, potentially giving access to binary files from the host
+	// (which can then be opened by container processes, leading to container
+	// escapes). Note that because this operation will close any open file
+	// descriptors that are referenced by (*os.File) handles from underneath
+	// the Go runtime, we must not do any file operations after this point
+	// (otherwise the (*os.File) finaliser could close the wrong file). See
+	// CVE-2024-21626 for more information as to why this protection is
+	// necessary.
+	//
+	// This is not needed for runc-dmz, because the extra execve(2) step means
+	// that all O_CLOEXEC file descriptors have already been closed and thus
+	// the second execve(2) from runc-dmz cannot access internal file
+	// descriptors from runc.
+	if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
+		return err
 	}
 	return system.Exec(name, l.config.Args, os.Environ())
 }

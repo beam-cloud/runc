@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux"
@@ -25,8 +24,8 @@ type linuxStandardInit struct {
 	consoleSocket *os.File
 	pidfdSocket   *os.File
 	parentPid     int
-	fifoFd        int
-	logFd         int
+	fifoFile      *os.File
+	logPipe       *os.File
 	dmzExe        *os.File
 	config        *initConfig
 }
@@ -244,11 +243,11 @@ func (l *linuxStandardInit) Init() error {
 
 	// Close the log pipe fd so the parent's ForwardLogs can exit.
 	logrus.Debugf("init: about to wait on exec fifo")
-	if err := unix.Close(l.logFd); err != nil {
-		return &os.PathError{Op: "close log pipe", Path: "fd " + strconv.Itoa(l.logFd), Err: err}
+	if err := l.logPipe.Close(); err != nil {
+		return fmt.Errorf("close log pipe: %w", err)
 	}
 
-	fifoPath, closer := utils.ProcThreadSelf("fd/" + strconv.Itoa(l.fifoFd))
+	fifoPath, closer := utils.ProcThreadSelfFd(l.fifoFile.Fd())
 	defer closer()
 
 	// Wait for the FIFO to be opened on the other side before exec-ing the
@@ -269,7 +268,7 @@ func (l *linuxStandardInit) Init() error {
 	// N.B. the core issue itself (passing dirfds to the host filesystem) has
 	// since been resolved.
 	// https://github.com/torvalds/linux/blob/v4.9/fs/exec.c#L1290-L1318
-	_ = unix.Close(l.fifoFd)
+	_ = l.fifoFile.Close()
 
 	s := l.config.SpecState
 	s.Pid = unix.Getpid()
@@ -281,6 +280,24 @@ func (l *linuxStandardInit) Init() error {
 	if l.dmzExe != nil {
 		l.config.Args[0] = name
 		return system.Fexecve(l.dmzExe.Fd(), l.config.Args, os.Environ())
+	}
+	// Close all file descriptors we are not passing to the container. This is
+	// necessary because the execve target could use internal runc fds as the
+	// execve path, potentially giving access to binary files from the host
+	// (which can then be opened by container processes, leading to container
+	// escapes). Note that because this operation will close any open file
+	// descriptors that are referenced by (*os.File) handles from underneath
+	// the Go runtime, we must not do any file operations after this point
+	// (otherwise the (*os.File) finaliser could close the wrong file). See
+	// CVE-2024-21626 for more information as to why this protection is
+	// necessary.
+	//
+	// This is not needed for runc-dmz, because the extra execve(2) step means
+	// that all O_CLOEXEC file descriptors have already been closed and thus
+	// the second execve(2) from runc-dmz cannot access internal file
+	// descriptors from runc.
+	if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
+		return err
 	}
 	return system.Exec(name, l.config.Args, os.Environ())
 }
