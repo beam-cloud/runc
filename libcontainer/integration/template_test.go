@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/devices"
 	"github.com/opencontainers/runc/libcontainer/specconv"
@@ -32,7 +33,7 @@ type tParam struct {
 // and the default setup for devices.
 //
 // If p is nil, a default container is created.
-func newTemplateConfig(t *testing.T, p *tParam) *configs.Config {
+func newTemplateConfig(t testing.TB, p *tParam) *configs.Config {
 	var allowedDevices []*devices.Rule
 	for _, device := range specconv.AllowedDevices {
 		allowedDevices = append(allowedDevices, &device.Rule)
@@ -75,22 +76,6 @@ func newTemplateConfig(t *testing.T, p *tParam) *configs.Config {
 				"CAP_KILL",
 				"CAP_AUDIT_WRITE",
 			},
-			Ambient: []string{
-				"CAP_CHOWN",
-				"CAP_DAC_OVERRIDE",
-				"CAP_FSETID",
-				"CAP_FOWNER",
-				"CAP_MKNOD",
-				"CAP_NET_RAW",
-				"CAP_SETGID",
-				"CAP_SETUID",
-				"CAP_SETFCAP",
-				"CAP_SETPCAP",
-				"CAP_NET_BIND_SERVICE",
-				"CAP_SYS_CHROOT",
-				"CAP_KILL",
-				"CAP_AUDIT_WRITE",
-			},
 			Effective: []string{
 				"CAP_CHOWN",
 				"CAP_DAC_OVERRIDE",
@@ -115,9 +100,9 @@ func newTemplateConfig(t *testing.T, p *tParam) *configs.Config {
 			{Type: configs.NEWPID},
 			{Type: configs.NEWNET},
 		}),
-		Cgroups: &configs.Cgroup{
+		Cgroups: &cgroups.Cgroup{
 			Systemd: p.systemd,
-			Resources: &configs.Resources{
+			Resources: &cgroups.Resources{
 				MemorySwappiness: nil,
 				Devices:          allowedDevices,
 			},

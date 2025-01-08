@@ -26,7 +26,6 @@ type linuxStandardInit struct {
 	parentPid     int
 	fifoFile      *os.File
 	logPipe       *os.File
-	dmzExe        *os.File
 	config        *initConfig
 }
 
@@ -156,13 +155,15 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
-	if l.config.Config.Scheduler != nil {
-		if err := setupScheduler(l.config.Config); err != nil {
-			return err
-		}
+	if err := setupScheduler(l.config.Config); err != nil {
+		return err
 	}
 
-	// Tell our parent that we're ready to Execv. This must be done before the
+	if err := setupIOPriority(l.config.Config); err != nil {
+		return err
+	}
+
+	// Tell our parent that we're ready to exec. This must be done before the
 	// Seccomp rules have been applied, because we need to be able to read and
 	// write to a socket.
 	if err := syncParentReady(l.pipe); err != nil {
@@ -205,13 +206,6 @@ func (l *linuxStandardInit) Init() error {
 	name, err := exec.LookPath(l.config.Args[0])
 	if err != nil {
 		return err
-	}
-	// exec.LookPath in Go < 1.20 might return no error for an executable
-	// residing on a file system mounted with noexec flag, so perform this
-	// extra check now while we can still return a proper error.
-	// TODO: remove this once go < 1.20 is not supported.
-	if err := eaccess(name); err != nil {
-		return &os.PathError{Op: "eaccess", Path: name, Err: err}
 	}
 
 	// Set seccomp as close to execve as possible, so as few syscalls take
@@ -270,17 +264,14 @@ func (l *linuxStandardInit) Init() error {
 	// https://github.com/torvalds/linux/blob/v4.9/fs/exec.c#L1290-L1318
 	_ = l.fifoFile.Close()
 
-	s := l.config.SpecState
-	s.Pid = unix.Getpid()
-	s.Status = specs.StateCreated
-	if err := l.config.Config.Hooks.Run(configs.StartContainer, s); err != nil {
-		return err
+	if s := l.config.SpecState; s != nil {
+		s.Pid = unix.Getpid()
+		s.Status = specs.StateCreated
+		if err := l.config.Config.Hooks.Run(configs.StartContainer, s); err != nil {
+			return err
+		}
 	}
 
-	if l.dmzExe != nil {
-		l.config.Args[0] = name
-		return system.Fexecve(l.dmzExe.Fd(), l.config.Args, os.Environ())
-	}
 	// Close all file descriptors we are not passing to the container. This is
 	// necessary because the execve target could use internal runc fds as the
 	// execve path, potentially giving access to binary files from the host
@@ -291,11 +282,6 @@ func (l *linuxStandardInit) Init() error {
 	// (otherwise the (*os.File) finaliser could close the wrong file). See
 	// CVE-2024-21626 for more information as to why this protection is
 	// necessary.
-	//
-	// This is not needed for runc-dmz, because the extra execve(2) step means
-	// that all O_CLOEXEC file descriptors have already been closed and thus
-	// the second execve(2) from runc-dmz cannot access internal file
-	// descriptors from runc.
 	if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
 		return err
 	}

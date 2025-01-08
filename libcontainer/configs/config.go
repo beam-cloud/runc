@@ -222,6 +222,9 @@ type Config struct {
 
 	// Personality contains configuration for the Linux personality syscall.
 	Personality *LinuxPersonality `json:"personality,omitempty"`
+
+	// IOPriority is the container's I/O priority.
+	IOPriority *IOPriority `json:"io_priority,omitempty"`
 }
 
 // Scheduler is based on the Linux sched_setattr(2) syscall.
@@ -283,6 +286,8 @@ func ToSchedAttr(scheduler *Scheduler) (*unix.SchedAttr, error) {
 	}, nil
 }
 
+type IOPriority = specs.LinuxIOPriority
+
 type (
 	HookName string
 	HookList []Hook
@@ -320,6 +325,19 @@ const (
 	// Poststop commands are called in the Runtime Namespace.
 	Poststop HookName = "poststop"
 )
+
+// HasHook checks if config has any hooks with any given names configured.
+func (c *Config) HasHook(names ...HookName) bool {
+	if c.Hooks == nil {
+		return false
+	}
+	for _, h := range names {
+		if len(c.Hooks[h]) > 0 {
+			return true
+		}
+	}
+	return false
+}
 
 // KnownHookNames returns the known hook names.
 // Used by `runc features`.

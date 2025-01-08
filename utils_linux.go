@@ -55,16 +55,13 @@ func newProcess(p specs.Process) (*libcontainer.Process, error) {
 		Label:           p.SelinuxLabel,
 		NoNewPrivileges: &p.NoNewPrivileges,
 		AppArmorProfile: p.ApparmorProfile,
+		Scheduler:       p.Scheduler,
+		IOPriority:      p.IOPriority,
 	}
 
 	if p.ConsoleSize != nil {
 		lp.ConsoleWidth = uint16(p.ConsoleSize.Width)
 		lp.ConsoleHeight = uint16(p.ConsoleSize.Height)
-	}
-
-	if p.Scheduler != nil {
-		s := *p.Scheduler
-		lp.Scheduler = &s
 	}
 
 	if p.Capabilities != nil {
@@ -138,9 +135,8 @@ func setupIO(process *libcontainer.Process, rootuid, rootgid int, createTTY, det
 	return setupProcessPipes(process, rootuid, rootgid)
 }
 
-// createPidFile creates a file with the processes pid inside it atomically
-// it creates a temp file with the paths filename + '.' infront of it
-// then renames the file
+// createPidFile creates a file containing the PID,
+// doing so atomically (via create and rename).
 func createPidFile(path string, process *libcontainer.Process) error {
 	pid, err := process.Pid()
 	if err != nil {
