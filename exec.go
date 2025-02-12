@@ -45,11 +45,6 @@ following will output a list of processes running in the container:
 			Name:  "env, e",
 			Usage: "set environment variables",
 		},
-		cli.StringFlag{
-			Name:  "config, a",
-			Value: "",
-			Usage: `path to a config file, which overrides the default config.json in the specified bundle directory`,
-		},
 		cli.BoolFlag{
 			Name:  "tty, t",
 			Usage: "allocate a pseudo-TTY",
@@ -210,7 +205,7 @@ func getProcess(context *cli.Context, c *libcontainer.Container) (*specs.Process
 	if err := os.Chdir(bundle); err != nil {
 		return nil, err
 	}
-	spec, err := loadSpec(specConfig, context)
+	spec, err := loadSpec(specConfig)
 	if err != nil {
 		return nil, err
 	}

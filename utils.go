@@ -75,7 +75,7 @@ func setupSpec(context *cli.Context) (*specs.Spec, error) {
 			return nil, err
 		}
 	}
-	spec, err := loadSpec(specConfig, context)
+	spec, err := loadSpec(specConfig)
 	if err != nil {
 		return nil, err
 	}
