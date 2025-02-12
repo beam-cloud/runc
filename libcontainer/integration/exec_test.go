@@ -18,7 +18,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/cgroups/systemd"
 	"github.com/opencontainers/runc/libcontainer/configs"
-	"github.com/opencontainers/runc/libcontainer/userns"
+	"github.com/opencontainers/runc/libcontainer/internal/userns"
 	"github.com/opencontainers/runc/libcontainer/utils"
 	"github.com/opencontainers/runtime-spec/specs-go"
 
@@ -136,11 +136,13 @@ func testRlimit(t *testing.T, userns bool) {
 
 	config := newTemplateConfig(t, &tParam{userns: userns})
 
-	// ensure limit is lower than what the config requests to test that in a user namespace
+	// Ensure limit is lower than what the config requests to test that in a user namespace
 	// the Setrlimit call happens early enough that we still have permissions to raise the limit.
+	// Do not change the Cur value to be equal to the Max value, please see:
+	// https://github.com/opencontainers/runc/pull/4265#discussion_r1589666444
 	ok(t, unix.Setrlimit(unix.RLIMIT_NOFILE, &unix.Rlimit{
 		Max: 1024,
-		Cur: 1024,
+		Cur: 512,
 	}))
 
 	out := runContainerOk(t, config, "/bin/sh", "-c", "ulimit -n")
@@ -397,7 +399,7 @@ func TestAdditionalGroups(t *testing.T) {
 		Env:              standardEnvironment,
 		Stdin:            nil,
 		Stdout:           &stdout,
-		AdditionalGroups: []string{"plugdev", "audio"},
+		AdditionalGroups: []int{3333, 99999},
 		Init:             true,
 	}
 	err = container.Run(&pconfig)
@@ -408,13 +410,11 @@ func TestAdditionalGroups(t *testing.T) {
 
 	outputGroups := stdout.String()
 
-	// Check that the groups output has the groups that we specified
-	if !strings.Contains(outputGroups, "audio") {
-		t.Fatalf("Listed groups do not contain the audio group as expected: %v", outputGroups)
-	}
-
-	if !strings.Contains(outputGroups, "plugdev") {
-		t.Fatalf("Listed groups do not contain the plugdev group as expected: %v", outputGroups)
+	// Check that the groups output has the groups that we specified.
+	for _, gid := range pconfig.AdditionalGroups {
+		if !strings.Contains(outputGroups, strconv.Itoa(gid)) {
+			t.Errorf("Listed groups do not contain gid %d as expected: %v", gid, outputGroups)
+		}
 	}
 }
 
@@ -470,7 +470,7 @@ func testFreeze(t *testing.T, withSystemd bool, useSet bool) {
 	if !useSet {
 		err = container.Pause()
 	} else {
-		config.Cgroups.Resources.Freezer = configs.Frozen
+		config.Cgroups.Resources.Freezer = cgroups.Frozen
 		err = container.Set(*config)
 	}
 	ok(t, err)
@@ -484,7 +484,7 @@ func testFreeze(t *testing.T, withSystemd bool, useSet bool) {
 	if !useSet {
 		err = container.Resume()
 	} else {
-		config.Cgroups.Resources.Freezer = configs.Thawed
+		config.Cgroups.Resources.Freezer = cgroups.Thawed
 		err = container.Set(*config)
 	}
 	ok(t, err)
@@ -722,7 +722,7 @@ func TestContainerState(t *testing.T) {
 		{Type: configs.NEWNS},
 		{Type: configs.NEWUTS},
 		// host for IPC
-		//{Type: configs.NEWIPC},
+		// {Type: configs.NEWIPC},
 		{Type: configs.NEWPID},
 		{Type: configs.NEWNET},
 	})
@@ -1020,13 +1020,13 @@ func TestHook(t *testing.T) {
 			}),
 		},
 		configs.CreateContainer: configs.HookList{
-			configs.NewCommandHook(configs.Command{
+			configs.NewCommandHook(&configs.Command{
 				Path: "/bin/bash",
 				Args: []string{"/bin/bash", "-c", fmt.Sprintf("touch ./%s", hookFiles[configs.CreateContainer])},
 			}),
 		},
 		configs.StartContainer: configs.HookList{
-			configs.NewCommandHook(configs.Command{
+			configs.NewCommandHook(&configs.Command{
 				Path: "/bin/sh",
 				Args: []string{"/bin/sh", "-c", fmt.Sprintf("touch /%s", hookFiles[configs.StartContainer])},
 			}),

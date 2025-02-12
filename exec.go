@@ -163,19 +163,7 @@ func execProcess(context *cli.Context) (int, error) {
 	if status == libcontainer.Paused && !context.Bool("ignore-paused") {
 		return -1, errors.New("cannot exec in a paused container (use --ignore-paused to override)")
 	}
-	path := context.String("process")
-	if path == "" && len(context.Args()) == 1 {
-		return -1, errors.New("process args cannot be empty")
-	}
-	state, err := container.State()
-	if err != nil {
-		return -1, err
-	}
-	bundle, ok := utils.SearchLabels(state.Config.Labels, "bundle")
-	if !ok {
-		return -1, errors.New("bundle not found in labels")
-	}
-	p, err := getProcess(context, bundle)
+	p, err := getProcess(context, container)
 	if err != nil {
 		return -1, err
 	}
@@ -201,7 +189,7 @@ func execProcess(context *cli.Context) (int, error) {
 	return r.run(p)
 }
 
-func getProcess(context *cli.Context, bundle string) (*specs.Process, error) {
+func getProcess(context *cli.Context, c *libcontainer.Container) (*specs.Process, error) {
 	if path := context.String("process"); path != "" {
 		f, err := os.Open(path)
 		if err != nil {
@@ -214,7 +202,11 @@ func getProcess(context *cli.Context, bundle string) (*specs.Process, error) {
 		}
 		return &p, validateProcessSpec(&p)
 	}
-	// process via cli flags
+	// Process from config.json and CLI flags.
+	bundle, ok := utils.SearchLabels(c.Config().Labels, "bundle")
+	if !ok {
+		return nil, errors.New("bundle not found in labels")
+	}
 	if err := os.Chdir(bundle); err != nil {
 		return nil, err
 	}
@@ -223,10 +215,14 @@ func getProcess(context *cli.Context, bundle string) (*specs.Process, error) {
 		return nil, err
 	}
 	p := spec.Process
-	p.Args = context.Args()[1:]
-	// override the cwd, if passed
-	if context.String("cwd") != "" {
-		p.Cwd = context.String("cwd")
+	args := context.Args()
+	if len(args) < 2 {
+		return nil, errors.New("exec args cannot be empty")
+	}
+	p.Args = args[1:]
+	// Override the cwd, if passed.
+	if cwd := context.String("cwd"); cwd != "" {
+		p.Cwd = cwd
 	}
 	if ap := context.String("apparmor"); ap != "" {
 		p.ApparmorProfile = ap
@@ -239,33 +235,35 @@ func getProcess(context *cli.Context, bundle string) (*specs.Process, error) {
 			p.Capabilities.Bounding = append(p.Capabilities.Bounding, c)
 			p.Capabilities.Effective = append(p.Capabilities.Effective, c)
 			p.Capabilities.Permitted = append(p.Capabilities.Permitted, c)
-			p.Capabilities.Ambient = append(p.Capabilities.Ambient, c)
+			// Since ambient capabilities can't be set without inherritable,
+			// and runc exec --cap don't set inheritable, let's only set
+			// ambient if we already have some inheritable bits set from spec.
+			if p.Capabilities.Inheritable != nil {
+				p.Capabilities.Ambient = append(p.Capabilities.Ambient, c)
+			}
 		}
 	}
 	// append the passed env variables
 	p.Env = append(p.Env, context.StringSlice("env")...)
 
-	// set the tty
-	p.Terminal = false
-	if context.IsSet("tty") {
-		p.Terminal = context.Bool("tty")
-	}
+	// Always set tty to false, unless explicitly enabled from CLI.
+	p.Terminal = context.Bool("tty")
 	if context.IsSet("no-new-privs") {
 		p.NoNewPrivileges = context.Bool("no-new-privs")
 	}
-	// override the user, if passed
-	if context.String("user") != "" {
-		u := strings.SplitN(context.String("user"), ":", 2)
-		if len(u) > 1 {
-			gid, err := strconv.Atoi(u[1])
+	// Override the user, if passed.
+	if user := context.String("user"); user != "" {
+		uids, gids, ok := strings.Cut(user, ":")
+		if ok {
+			gid, err := strconv.Atoi(gids)
 			if err != nil {
-				return nil, fmt.Errorf("parsing %s as int for gid failed: %w", u[1], err)
+				return nil, fmt.Errorf("bad gid: %w", err)
 			}
 			p.User.GID = uint32(gid)
 		}
-		uid, err := strconv.Atoi(u[0])
+		uid, err := strconv.Atoi(uids)
 		if err != nil {
-			return nil, fmt.Errorf("parsing %s as int for uid failed: %w", u[0], err)
+			return nil, fmt.Errorf("bad uid: %w", err)
 		}
 		p.User.UID = uint32(uid)
 	}

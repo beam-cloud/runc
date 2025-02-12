@@ -11,10 +11,9 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
-	"strings"
+	"syscall"
 
 	"github.com/containerd/console"
-	"github.com/moby/sys/user"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
@@ -57,8 +56,9 @@ type initConfig struct {
 	ProcessLabel     string                `json:"process_label"`
 	AppArmorProfile  string                `json:"apparmor_profile"`
 	NoNewPrivileges  bool                  `json:"no_new_privileges"`
-	User             string                `json:"user"`
-	AdditionalGroups []string              `json:"additional_groups"`
+	UID              int                   `json:"uid"`
+	GID              int                   `json:"gid"`
+	AdditionalGroups []int                 `json:"additional_groups"`
 	Config           *configs.Config       `json:"config"`
 	Networks         []*network            `json:"network"`
 	PassedFilesCount int                   `json:"passed_files_count"`
@@ -184,19 +184,8 @@ func startInitialization() (retErr error) {
 		defer pidfdSocket.Close()
 	}
 
-	// Get runc-dmz fds.
-	var dmzExe *os.File
-	if dmzFdStr := os.Getenv("_LIBCONTAINER_DMZEXEFD"); dmzFdStr != "" {
-		dmzFd, err := strconv.Atoi(dmzFdStr)
-		if err != nil {
-			return fmt.Errorf("unable to convert _LIBCONTAINER_DMZEXEFD: %w", err)
-		}
-		unix.CloseOnExec(dmzFd)
-		dmzExe = os.NewFile(uintptr(dmzFd), "runc-dmz")
-	}
-
-	// clear the current process's environment to clean any libcontainer
-	// specific env vars.
+	// From here on, we don't need current process environment. It is not
+	// used directly anywhere below this point, but let's clear it anyway.
 	os.Clearenv()
 
 	defer func() {
@@ -215,13 +204,19 @@ func startInitialization() (retErr error) {
 	}
 
 	// If init succeeds, it will not return, hence none of the defers will be called.
-	return containerInit(it, &config, syncPipe, consoleSocket, pidfdSocket, fifoFile, logPipe, dmzExe)
+	return containerInit(it, &config, syncPipe, consoleSocket, pidfdSocket, fifoFile, logPipe)
 }
 
-func containerInit(t initType, config *initConfig, pipe *syncSocket, consoleSocket, pidfdSocket, fifoFile, logPipe, dmzExe *os.File) error {
-	if err := populateProcessEnvironment(config.Env); err != nil {
+func containerInit(t initType, config *initConfig, pipe *syncSocket, consoleSocket, pidfdSocket, fifoFile, logPipe *os.File) error {
+	env, err := prepareEnv(config.Env, config.UID)
+	if err != nil {
 		return err
 	}
+	config.Env = env
+
+	// Clean the RLIMIT_NOFILE cache in go runtime.
+	// Issue: https://github.com/opencontainers/runc/issues/4195
+	maybeClearRlimitNofileCache(config.Rlimits)
 
 	switch t {
 	case initSetns:
@@ -231,7 +226,6 @@ func containerInit(t initType, config *initConfig, pipe *syncSocket, consoleSock
 			pidfdSocket:   pidfdSocket,
 			config:        config,
 			logPipe:       logPipe,
-			dmzExe:        dmzExe,
 		}
 		return i.Init()
 	case initStandard:
@@ -243,36 +237,10 @@ func containerInit(t initType, config *initConfig, pipe *syncSocket, consoleSock
 			config:        config,
 			fifoFile:      fifoFile,
 			logPipe:       logPipe,
-			dmzExe:        dmzExe,
 		}
 		return i.Init()
 	}
 	return fmt.Errorf("unknown init type %q", t)
-}
-
-// populateProcessEnvironment loads the provided environment variables into the
-// current processes's environment.
-func populateProcessEnvironment(env []string) error {
-	for _, pair := range env {
-		p := strings.SplitN(pair, "=", 2)
-		if len(p) < 2 {
-			return errors.New("invalid environment variable: missing '='")
-		}
-		name, val := p[0], p[1]
-		if name == "" {
-			return errors.New("invalid environment variable: name cannot be empty")
-		}
-		if strings.IndexByte(name, 0) >= 0 {
-			return fmt.Errorf("invalid environment variable %q: name contains nul byte (\\x00)", name)
-		}
-		if strings.IndexByte(val, 0) >= 0 {
-			return fmt.Errorf("invalid environment variable %q: value contains nul byte (\\x00)", name)
-		}
-		if err := os.Setenv(name, val); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // verifyCwd ensures that the current directory is actually inside the mount
@@ -303,7 +271,7 @@ func verifyCwd() error {
 
 // finalizeNamespace drops the caps, sets the correct user
 // and working dir, and closes any leaked file descriptors
-// before executing the command inside the namespace
+// before executing the command inside the namespace.
 func finalizeNamespace(config *initConfig) error {
 	// Ensure that all unwanted fds we may have accidentally
 	// inherited are marked close-on-exec so they stay out of the
@@ -399,7 +367,6 @@ func setupConsole(socket *os.File, config *initConfig, mount bool) error {
 			Height: config.ConsoleHeight,
 			Width:  config.ConsoleWidth,
 		})
-
 		if err != nil {
 			return err
 		}
@@ -447,11 +414,11 @@ func syncParentHooks(pipe *syncSocket) error {
 
 // syncParentSeccomp sends the fd associated with the seccomp file descriptor
 // to the parent, and wait for the parent to do pidfd_getfd() to grab a copy.
-func syncParentSeccomp(pipe *syncSocket, seccompFd *os.File) error {
-	if seccompFd == nil {
+func syncParentSeccomp(pipe *syncSocket, seccompFd int) error {
+	if seccompFd == -1 {
 		return nil
 	}
-	defer seccompFd.Close()
+	defer unix.Close(seccompFd)
 
 	// Tell parent to grab our fd.
 	//
@@ -462,58 +429,18 @@ func syncParentSeccomp(pipe *syncSocket, seccompFd *os.File) error {
 	// before the parent gets the file descriptor would deadlock "runc init" if
 	// we allowed it for SCMP_ACT_NOTIFY). See seccomp.InitSeccomp() for more
 	// details.
-	if err := writeSyncArg(pipe, procSeccomp, seccompFd.Fd()); err != nil {
+	if err := writeSyncArg(pipe, procSeccomp, seccompFd); err != nil {
 		return err
 	}
 	// Wait for parent to tell us they've grabbed the seccompfd.
 	return readSync(pipe, procSeccompDone)
 }
 
-// setupUser changes the groups, gid, and uid for the user inside the container
+// setupUser changes the groups, gid, and uid for the user inside the container.
 func setupUser(config *initConfig) error {
-	// Set up defaults.
-	defaultExecUser := user.ExecUser{
-		Uid:  0,
-		Gid:  0,
-		Home: "/",
-	}
-
-	passwdPath, err := user.GetPasswdPath()
-	if err != nil {
-		return err
-	}
-
-	groupPath, err := user.GetGroupPath()
-	if err != nil {
-		return err
-	}
-
-	execUser, err := user.GetExecUserPath(config.User, &defaultExecUser, passwdPath, groupPath)
-	if err != nil {
-		return err
-	}
-
-	var addGroups []int
-	if len(config.AdditionalGroups) > 0 {
-		addGroups, err = user.GetAdditionalGroupsPath(config.AdditionalGroups, groupPath)
-		if err != nil {
-			return err
-		}
-	}
-
-	if config.RootlessEUID {
-		// We cannot set any additional groups in a rootless container and thus
-		// we bail if the user asked us to do so. TODO: We currently can't do
-		// this check earlier, but if libcontainer.Process.User was typesafe
-		// this might work.
-		if len(addGroups) > 0 {
-			return errors.New("cannot set any additional groups in a rootless container")
-		}
-	}
-
 	// Before we change to the container's user make sure that the processes
 	// STDIO is correctly owned by the user that we are switching to.
-	if err := fixStdioPermissions(execUser); err != nil {
+	if err := fixStdioPermissions(config.UID); err != nil {
 		return err
 	}
 
@@ -532,38 +459,30 @@ func setupUser(config *initConfig) error {
 	allowSupGroups := !config.RootlessEUID && string(bytes.TrimSpace(setgroups)) != "deny"
 
 	if allowSupGroups {
-		suppGroups := append(execUser.Sgids, addGroups...)
-		if err := unix.Setgroups(suppGroups); err != nil {
+		if err := unix.Setgroups(config.AdditionalGroups); err != nil {
 			return &os.SyscallError{Syscall: "setgroups", Err: err}
 		}
 	}
 
-	if err := unix.Setgid(execUser.Gid); err != nil {
+	if err := unix.Setgid(config.GID); err != nil {
 		if err == unix.EINVAL {
-			return fmt.Errorf("cannot setgid to unmapped gid %d in user namespace", execUser.Gid)
+			return fmt.Errorf("cannot setgid to unmapped gid %d in user namespace", config.GID)
 		}
 		return err
 	}
-	if err := unix.Setuid(execUser.Uid); err != nil {
+	if err := unix.Setuid(config.UID); err != nil {
 		if err == unix.EINVAL {
-			return fmt.Errorf("cannot setuid to unmapped uid %d in user namespace", execUser.Uid)
+			return fmt.Errorf("cannot setuid to unmapped uid %d in user namespace", config.UID)
 		}
 		return err
-	}
-
-	// if we didn't get HOME already, set it based on the user's HOME
-	if envHome := os.Getenv("HOME"); envHome == "" {
-		if err := os.Setenv("HOME", execUser.Home); err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
-// fixStdioPermissions fixes the permissions of PID 1's STDIO within the container to the specified user.
+// fixStdioPermissions fixes the permissions of PID 1's STDIO within the container to the specified uid.
 // The ownership needs to match because it is created outside of the container and needs to be
 // localized.
-func fixStdioPermissions(u *user.ExecUser) error {
+func fixStdioPermissions(uid int) error {
 	var null unix.Stat_t
 	if err := unix.Stat("/dev/null", &null); err != nil {
 		return &os.PathError{Op: "stat", Path: "/dev/null", Err: err}
@@ -576,7 +495,7 @@ func fixStdioPermissions(u *user.ExecUser) error {
 
 		// Skip chown if uid is already the one we want or any of the STDIO descriptors
 		// were redirected to /dev/null.
-		if int(s.Uid) == u.Uid || s.Rdev == null.Rdev {
+		if int(s.Uid) == uid || s.Rdev == null.Rdev {
 			continue
 		}
 
@@ -586,7 +505,7 @@ func fixStdioPermissions(u *user.ExecUser) error {
 		// that users expect to be able to actually use their console. Without
 		// this code, you couldn't effectively run as a non-root user inside a
 		// container and also have a console set up.
-		if err := file.Chown(u.Uid, int(s.Gid)); err != nil {
+		if err := file.Chown(uid, int(s.Gid)); err != nil {
 			// If we've hit an EINVAL then s.Gid isn't mapped in the user
 			// namespace. If we've hit an EPERM then the inode's current owner
 			// is not mapped in our user namespace (in particular,
@@ -650,6 +569,18 @@ func setupRoute(config *configs.Config) error {
 	return nil
 }
 
+func maybeClearRlimitNofileCache(limits []configs.Rlimit) {
+	for _, rlimit := range limits {
+		if rlimit.Type == syscall.RLIMIT_NOFILE {
+			system.ClearRlimitNofileCache(&syscall.Rlimit{
+				Cur: rlimit.Soft,
+				Max: rlimit.Hard,
+			})
+			return
+		}
+	}
+}
+
 func setupRlimits(limits []configs.Rlimit, pid int) error {
 	for _, rlimit := range limits {
 		if err := unix.Prlimit(pid, rlimit.Type, &unix.Rlimit{Max: rlimit.Hard, Cur: rlimit.Soft}, nil); err != nil {
@@ -660,6 +591,9 @@ func setupRlimits(limits []configs.Rlimit, pid int) error {
 }
 
 func setupScheduler(config *configs.Config) error {
+	if config.Scheduler == nil {
+		return nil
+	}
 	attr, err := configs.ToSchedAttr(config.Scheduler)
 	if err != nil {
 		return err
@@ -673,6 +607,35 @@ func setupScheduler(config *configs.Config) error {
 	return nil
 }
 
+func setupIOPriority(config *configs.Config) error {
+	const ioprioWhoPgrp = 1
+
+	ioprio := config.IOPriority
+	if ioprio == nil {
+		return nil
+	}
+	class := 0
+	switch ioprio.Class {
+	case specs.IOPRIO_CLASS_RT:
+		class = 1
+	case specs.IOPRIO_CLASS_BE:
+		class = 2
+	case specs.IOPRIO_CLASS_IDLE:
+		class = 3
+	default:
+		return fmt.Errorf("invalid io priority class: %s", ioprio.Class)
+	}
+
+	// Combine class and priority into a single value
+	// https://github.com/torvalds/linux/blob/v5.18/include/uapi/linux/ioprio.h#L5-L17
+	iop := (class << 13) | ioprio.Priority
+	_, _, errno := unix.RawSyscall(unix.SYS_IOPRIO_SET, ioprioWhoPgrp, 0, uintptr(iop))
+	if errno != 0 {
+		return fmt.Errorf("failed to set io priority: %w", errno)
+	}
+	return nil
+}
+
 func setupPersonality(config *configs.Config) error {
 	return system.SetLinuxPersonality(config.Personality.Domain)
 }
@@ -681,7 +644,7 @@ func setupPersonality(config *configs.Config) error {
 // manager's cgroups sending the signal s to them.
 func signalAllProcesses(m cgroups.Manager, s unix.Signal) error {
 	if !m.Exists() {
-		return ErrNotRunning
+		return ErrCgroupNotExist
 	}
 	// Use cgroup.kill, if available.
 	if s == unix.SIGKILL {
@@ -694,12 +657,12 @@ func signalAllProcesses(m cgroups.Manager, s unix.Signal) error {
 		}
 	}
 
-	if err := m.Freeze(configs.Frozen); err != nil {
+	if err := m.Freeze(cgroups.Frozen); err != nil {
 		logrus.Warn(err)
 	}
 	pids, err := m.GetAllPids()
 	if err != nil {
-		if err := m.Freeze(configs.Thawed); err != nil {
+		if err := m.Freeze(cgroups.Thawed); err != nil {
 			logrus.Warn(err)
 		}
 		return err
@@ -710,7 +673,7 @@ func signalAllProcesses(m cgroups.Manager, s unix.Signal) error {
 			logrus.Warnf("kill %d: %v", pid, err)
 		}
 	}
-	if err := m.Freeze(configs.Thawed); err != nil {
+	if err := m.Freeze(cgroups.Thawed); err != nil {
 		logrus.Warn(err)
 	}
 

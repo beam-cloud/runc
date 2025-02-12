@@ -3,9 +3,6 @@ SHELL = /bin/bash
 CONTAINER_ENGINE := docker
 GO ?= go
 
-# Get CC values for cross-compilation.
-include cc_platform.mk
-
 PREFIX ?= /usr/local
 BINDIR := $(PREFIX)/sbin
 MANDIR := $(PREFIX)/share/man
@@ -14,14 +11,23 @@ GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null)
 GIT_BRANCH_CLEAN := $(shell echo $(GIT_BRANCH) | sed -e "s/[^[:alnum:]]/-/g")
 RUNC_IMAGE := runc_dev$(if $(GIT_BRANCH_CLEAN),:$(GIT_BRANCH_CLEAN))
 PROJECT := github.com/opencontainers/runc
-BUILDTAGS ?= seccomp urfave_cli_no_docs
+EXTRA_BUILDTAGS :=
+BUILDTAGS := seccomp urfave_cli_no_docs
 BUILDTAGS += $(EXTRA_BUILDTAGS)
 
-COMMIT ?= $(shell git describe --dirty --long --always)
-VERSION := $(shell cat ./VERSION)
+COMMIT := $(shell git describe --dirty --long --always)
+EXTRA_VERSION :=
+VERSION := $(shell cat ./VERSION)$(EXTRA_VERSION)
 LDFLAGS_COMMON := -X main.gitCommit=$(COMMIT) -X main.version=$(VERSION)
 
 GOARCH := $(shell $(GO) env GOARCH)
+
+# -trimpath may be required on some platforms to create reproducible builds
+# on the other hand, it does strip out build information, like -ldflags, which
+# some tools use to infer the version, in the absence of go information,
+# which happens when you use `go build`.
+# This enables someone to override by doing `make runc TRIMPATH= ` etc.
+TRIMPATH := -trimpath
 
 GO_BUILDMODE :=
 # Enable dynamic PIE executables on supported platforms.
@@ -30,7 +36,7 @@ ifneq (,$(filter $(GOARCH),386 amd64 arm arm64 ppc64le riscv64 s390x))
 		GO_BUILDMODE := "-buildmode=pie"
 	endif
 endif
-GO_BUILD := $(GO) build -trimpath $(GO_BUILDMODE) \
+GO_BUILD := $(GO) build $(TRIMPATH) $(GO_BUILDMODE) \
 	$(EXTRA_FLAGS) -tags "$(BUILDTAGS)" \
 	-ldflags "$(LDFLAGS_COMMON) $(EXTRA_LDFLAGS)"
 
@@ -46,7 +52,7 @@ ifneq (,$(filter $(GOARCH),arm64 amd64))
 	endif
 endif
 # Enable static PIE binaries on supported platforms.
-GO_BUILD_STATIC := $(GO) build -trimpath $(GO_BUILDMODE_STATIC) \
+GO_BUILD_STATIC := $(GO) build $(TRIMPATH) $(GO_BUILDMODE_STATIC) \
 	$(EXTRA_FLAGS) -tags "$(BUILDTAGS) netgo osusergo" \
 	-ldflags "$(LDFLAGS_COMMON) $(LDFLAGS_STATIC) $(EXTRA_LDFLAGS)"
 
@@ -64,43 +70,43 @@ endif
 .DEFAULT: runc
 
 .PHONY: runc
-runc: runc-bin verify-dmz-arch
+runc: runc-bin
 
 .PHONY: runc-bin
-runc-bin: runc-dmz
+runc-bin:
 	$(GO_BUILD) -o runc .
 
 .PHONY: all
-all: runc recvtty sd-helper seccompagent fs-idmap memfd-bind pidfd-kill remap-rootfs
+all: runc memfd-bind
 
-.PHONY: recvtty sd-helper seccompagent fs-idmap memfd-bind pidfd-kill remap-rootfs
-recvtty sd-helper seccompagent fs-idmap memfd-bind pidfd-kill remap-rootfs:
+.PHONY: memfd-bind
+memfd-bind:
 	$(GO_BUILD) -o contrib/cmd/$@/$@ ./contrib/cmd/$@
+
+TESTBINDIR := tests/cmd/_bin
+$(TESTBINDIR):
+	mkdir $(TESTBINDIR)
+
+TESTBINS := recvtty sd-helper seccompagent fs-idmap pidfd-kill remap-rootfs
+.PHONY: test-binaries $(TESTBINS)
+test-binaries: $(TESTBINS)
+$(TESTBINS): $(TESTBINDIR)
+	$(GO_BUILD) -o $(TESTBINDIR) ./tests/cmd/$@
 
 .PHONY: clean
 clean:
-	rm -f runc runc-* libcontainer/dmz/binary/runc-dmz
-	rm -f contrib/cmd/recvtty/recvtty
-	rm -f contrib/cmd/sd-helper/sd-helper
-	rm -f contrib/cmd/seccompagent/seccompagent
-	rm -f contrib/cmd/fs-idmap/fs-idmap
+	rm -f runc runc-*
 	rm -f contrib/cmd/memfd-bind/memfd-bind
-	rm -f contrib/cmd/pidfd-kill/pidfd-kill
-	rm -f contrib/cmd/remap-rootfs/remap-rootfs
+	rm -fr $(TESTBINDIR)
 	sudo rm -rf release
 	rm -rf man/man8
 
 .PHONY: static
-static: static-bin verify-dmz-arch
+static: static-bin
 
 .PHONY: static-bin
-static-bin: runc-dmz
+static-bin:
 	$(GO_BUILD_STATIC) -o runc .
-
-.PHONY: runc-dmz
-runc-dmz:
-	rm -f libcontainer/dmz/binary/runc-dmz
-	$(GO) generate -tags "$(BUILDTAGS)" ./libcontainer/dmz
 
 .PHONY: releaseall
 releaseall: RELEASE_ARGS := "-a 386 -a amd64 -a arm64 -a armel -a armhf -a ppc64le -a riscv64 -a s390x"
@@ -123,7 +129,7 @@ dbuild: runcimage
 	$(CONTAINER_ENGINE) run $(CONTAINER_ENGINE_RUN_FLAGS) \
 		--privileged --rm \
 		-v $(CURDIR):/go/src/$(PROJECT) \
-		$(RUNC_IMAGE) make clean all
+		$(RUNC_IMAGE) make clean runc test-binaries
 
 .PHONY: lint
 lint:
@@ -152,7 +158,7 @@ unittest: runcimage
 		$(RUNC_IMAGE) make localunittest TESTFLAGS="$(TESTFLAGS)"
 
 .PHONY: localunittest
-localunittest: all
+localunittest: test-binaries
 	$(GO) test -timeout 3m -tags "$(BUILDTAGS)" $(TESTFLAGS) -v ./...
 
 .PHONY: integration
@@ -164,7 +170,7 @@ integration: runcimage
 		$(RUNC_IMAGE) make localintegration TESTPATH="$(TESTPATH)"
 
 .PHONY: localintegration
-localintegration: all
+localintegration: runc test-binaries
 	bats -t tests/integration$(TESTPATH)
 
 .PHONY: rootlessintegration
@@ -176,7 +182,7 @@ rootlessintegration: runcimage
 		$(RUNC_IMAGE) make localrootlessintegration
 
 .PHONY: localrootlessintegration
-localrootlessintegration: all
+localrootlessintegration: runc test-binaries
 	tests/rootless.sh
 
 .PHONY: shell
@@ -202,7 +208,7 @@ install-man: man
 .PHONY: cfmt
 cfmt: C_SRC=$(shell git ls-files '*.c' | grep -v '^vendor/')
 cfmt:
-	indent -linux -l120 -il0 -ppi2 -cp1 -T size_t -T jmp_buf $(C_SRC)
+	indent -linux -l120 -il0 -ppi2 -cp1 -sar -T size_t -T jmp_buf $(C_SRC)
 
 .PHONY: shellcheck
 shellcheck:
@@ -239,16 +245,6 @@ verify-dependencies: vendor
 	@test -z "$$(git status --porcelain -- go.mod go.sum vendor/)" \
 		|| (echo -e "git status:\n $$(git status -- go.mod go.sum vendor/)\nerror: vendor/, go.mod and/or go.sum not up to date. Run \"make vendor\" to update"; exit 1) \
 		&& echo "all vendor files are up to date."
-
-.PHONY: verify-dmz-arch
-verify-dmz-arch:
-	@if test -s libcontainer/dmz/binary/runc-dmz; then \
-		set -Eeuo pipefail; \
-		export LC_ALL=C; \
-		diff -u \
-			<(readelf -h runc | grep -E "(Machine|Flags):") \
-			<(readelf -h libcontainer/dmz/binary/runc-dmz | grep -E "(Machine|Flags):"); \
-	fi
 
 .PHONY: validate-keyring
 validate-keyring:

@@ -15,10 +15,10 @@ import (
 	systemdDbus "github.com/coreos/go-systemd/v22/dbus"
 	dbus "github.com/godbus/dbus/v5"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
+	devices "github.com/opencontainers/runc/libcontainer/cgroups/devices/config"
 	"github.com/opencontainers/runc/libcontainer/configs"
-	"github.com/opencontainers/runc/libcontainer/devices"
+	"github.com/opencontainers/runc/libcontainer/internal/userns"
 	"github.com/opencontainers/runc/libcontainer/seccomp"
-	"github.com/opencontainers/runc/libcontainer/userns"
 	libcontainerUtils "github.com/opencontainers/runc/libcontainer/utils"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
@@ -315,6 +315,23 @@ var AllowedDevices = []*devices.Device{
 			Allow:       true,
 		},
 	},
+	// The following entry for /dev/net/tun device was there from the
+	// very early days of Docker, but got removed in runc 1.2.0-rc1,
+	// causing a number of regressions for users (see
+	// https://github.com/opencontainers/runc/pull/3468).
+	//
+	// Some upper-level orcherstration tools makes it either impossible
+	// or cumbersome to supply additional device rules, so we have to
+	// keep this for the sake of backward compatibility.
+	{
+		Rule: devices.Rule{
+			Type:        devices.CharDevice,
+			Major:       10,
+			Minor:       200,
+			Permissions: "rwm",
+			Allow:       true,
+		},
+	},
 }
 
 type CreateOpts struct {
@@ -415,7 +432,7 @@ func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
 			}
 			config.Namespaces.Add(t, ns.Path)
 		}
-		if config.Namespaces.Contains(configs.NEWNET) && config.Namespaces.PathOf(configs.NEWNET) == "" {
+		if config.Namespaces.IsPrivate(configs.NEWNET) {
 			config.Networks = []*configs.Network{
 				{
 					Type: "loopback",
@@ -481,7 +498,7 @@ func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
 	// Only set it if the container will have its own cgroup
 	// namespace and the cgroupfs will be mounted read/write.
 	//
-	hasCgroupNS := config.Namespaces.Contains(configs.NEWCGROUP) && config.Namespaces.PathOf(configs.NEWCGROUP) == ""
+	hasCgroupNS := config.Namespaces.IsPrivate(configs.NEWCGROUP)
 	hasRwCgroupfs := false
 	if hasCgroupNS {
 		for _, m := range config.Mounts {
@@ -533,6 +550,11 @@ func CreateLibcontainerConfig(opts *CreateOpts) (*configs.Config, error) {
 		if spec.Process.Scheduler != nil {
 			s := *spec.Process.Scheduler
 			config.Scheduler = &s
+		}
+
+		if spec.Process.IOPriority != nil {
+			ioPriority := *spec.Process.IOPriority
+			config.IOPriority = &ioPriority
 		}
 	}
 	createHooks(spec, config)
@@ -692,7 +714,7 @@ func initSystemdProps(spec *specs.Spec) ([]systemdDbus.Property, error) {
 	return sp, nil
 }
 
-func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*configs.Cgroup, error) {
+func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*cgroups.Cgroup, error) {
 	var (
 		myCgroupPath string
 
@@ -701,10 +723,10 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 		name             = opts.CgroupName
 	)
 
-	c := &configs.Cgroup{
+	c := &cgroups.Cgroup{
 		Systemd:   useSystemdCgroup,
 		Rootless:  opts.RootlessCgroups,
-		Resources: &configs.Resources{},
+		Resources: &cgroups.Resources{},
 	}
 
 	if useSystemdCgroup {
@@ -848,40 +870,40 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 					if wd.LeafWeight != nil {
 						leafWeight = *wd.LeafWeight
 					}
-					weightDevice := configs.NewWeightDevice(wd.Major, wd.Minor, weight, leafWeight)
+					weightDevice := cgroups.NewWeightDevice(wd.Major, wd.Minor, weight, leafWeight)
 					c.Resources.BlkioWeightDevice = append(c.Resources.BlkioWeightDevice, weightDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleReadBpsDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleReadBpsDevice = append(c.Resources.BlkioThrottleReadBpsDevice, throttleDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleWriteBpsDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleWriteBpsDevice = append(c.Resources.BlkioThrottleWriteBpsDevice, throttleDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleReadIOPSDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleReadIOPSDevice = append(c.Resources.BlkioThrottleReadIOPSDevice, throttleDevice)
 				}
 				for _, td := range r.BlockIO.ThrottleWriteIOPSDevice {
 					rate := td.Rate
-					throttleDevice := configs.NewThrottleDevice(td.Major, td.Minor, rate)
+					throttleDevice := cgroups.NewThrottleDevice(td.Major, td.Minor, rate)
 					c.Resources.BlkioThrottleWriteIOPSDevice = append(c.Resources.BlkioThrottleWriteIOPSDevice, throttleDevice)
 				}
 			}
 			for _, l := range r.HugepageLimits {
-				c.Resources.HugetlbLimit = append(c.Resources.HugetlbLimit, &configs.HugepageLimit{
+				c.Resources.HugetlbLimit = append(c.Resources.HugetlbLimit, &cgroups.HugepageLimit{
 					Pagesize: l.Pagesize,
 					Limit:    l.Limit,
 				})
 			}
 			if len(r.Rdma) > 0 {
-				c.Resources.Rdma = make(map[string]configs.LinuxRdma, len(r.Rdma))
+				c.Resources.Rdma = make(map[string]cgroups.LinuxRdma, len(r.Rdma))
 				for k, v := range r.Rdma {
-					c.Resources.Rdma[k] = configs.LinuxRdma{
+					c.Resources.Rdma[k] = cgroups.LinuxRdma{
 						HcaHandles: v.HcaHandles,
 						HcaObjects: v.HcaObjects,
 					}
@@ -892,7 +914,7 @@ func CreateCgroupConfig(opts *CreateOpts, defaultDevs []*devices.Device) (*confi
 					c.Resources.NetClsClassid = *r.Network.ClassID
 				}
 				for _, m := range r.Network.Priorities {
-					c.Resources.NetPrioIfpriomap = append(c.Resources.NetPrioIfpriomap, &configs.IfPrioMap{
+					c.Resources.NetPrioIfpriomap = append(c.Resources.NetPrioIfpriomap, &cgroups.IfPrioMap{
 						Interface: m.Name,
 						Priority:  int64(m.Priority),
 					})
@@ -1234,8 +1256,8 @@ func createHooks(rspec *specs.Spec, config *configs.Config) {
 	}
 }
 
-func createCommandHook(h specs.Hook) configs.Command {
-	cmd := configs.Command{
+func createCommandHook(h specs.Hook) *configs.Command {
+	cmd := &configs.Command{
 		Path: h.Path,
 		Args: h.Args,
 		Env:  h.Env,

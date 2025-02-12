@@ -9,7 +9,6 @@ import (
 
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/cgroups/fscommon"
-	"github.com/opencontainers/runc/libcontainer/configs"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,7 +18,7 @@ func (s *CpuGroup) Name() string {
 	return "cpu"
 }
 
-func (s *CpuGroup) Apply(path string, r *configs.Resources, pid int) error {
+func (s *CpuGroup) Apply(path string, r *cgroups.Resources, pid int) error {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return err
 	}
@@ -34,21 +33,37 @@ func (s *CpuGroup) Apply(path string, r *configs.Resources, pid int) error {
 	return cgroups.WriteCgroupProc(path, pid)
 }
 
-func (s *CpuGroup) SetRtSched(path string, r *configs.Resources) error {
+func (s *CpuGroup) SetRtSched(path string, r *cgroups.Resources) error {
+	var period string
 	if r.CpuRtPeriod != 0 {
-		if err := cgroups.WriteFile(path, "cpu.rt_period_us", strconv.FormatUint(r.CpuRtPeriod, 10)); err != nil {
-			return err
+		period = strconv.FormatUint(r.CpuRtPeriod, 10)
+		if err := cgroups.WriteFile(path, "cpu.rt_period_us", period); err != nil {
+			// The values of cpu.rt_period_us and cpu.rt_runtime_us
+			// are inter-dependent and need to be set in a proper order.
+			// If the kernel rejects the new period value with EINVAL
+			// and the new runtime value is also being set, let's
+			// ignore the error for now and retry later.
+			if !errors.Is(err, unix.EINVAL) || r.CpuRtRuntime == 0 {
+				return err
+			}
+		} else {
+			period = ""
 		}
 	}
 	if r.CpuRtRuntime != 0 {
 		if err := cgroups.WriteFile(path, "cpu.rt_runtime_us", strconv.FormatInt(r.CpuRtRuntime, 10)); err != nil {
 			return err
 		}
+		if period != "" {
+			if err := cgroups.WriteFile(path, "cpu.rt_period_us", period); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-func (s *CpuGroup) Set(path string, r *configs.Resources) error {
+func (s *CpuGroup) Set(path string, r *cgroups.Resources) error {
 	if r.CpuShares != 0 {
 		shares := r.CpuShares
 		if err := cgroups.WriteFile(path, "cpu.shares", strconv.FormatUint(shares, 10)); err != nil {
@@ -89,9 +104,11 @@ func (s *CpuGroup) Set(path string, r *configs.Resources) error {
 	if r.CpuBurst != nil {
 		burst = strconv.FormatUint(*r.CpuBurst, 10)
 		if err := cgroups.WriteFile(path, "cpu.cfs_burst_us", burst); err != nil {
-			// this is a special trick for burst feature, the current systemd and low version of kernel will not support it.
-			// So, an `no such file or directory` error would be raised, and we can ignore it .
-			if !errors.Is(err, unix.ENOENT) {
+			if errors.Is(err, unix.ENOENT) {
+				// If CPU burst knob is not available (e.g.
+				// older kernel), ignore it.
+				burst = ""
+			} else {
 				// Sometimes when the burst to be set is larger
 				// than the current one, it is rejected by the kernel
 				// (EINVAL) as old_quota/new_burst exceeds the parent
@@ -117,9 +134,7 @@ func (s *CpuGroup) Set(path string, r *configs.Resources) error {
 		}
 		if burst != "" {
 			if err := cgroups.WriteFile(path, "cpu.cfs_burst_us", burst); err != nil {
-				if !errors.Is(err, unix.ENOENT) {
-					return err
-				}
+				return err
 			}
 		}
 	}

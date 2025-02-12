@@ -8,13 +8,13 @@ on:
       - release-*
   pull_request:
 env:
-  GO_VERSION: 1.20.x
+  GO_VERSION: 1.23.x
 permissions:
   contents: read
 
 jobs:
   keyring:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: check runc.keyring
@@ -26,7 +26,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: write # to allow the action to annotate code in the PR.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,22 +34,39 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "${{ env.GO_VERSION }}"
-          cache: false # golangci-lint-action does its own caching
       - name: install deps
         run: |
           sudo apt -q update
-          sudo apt -q install libseccomp-dev
-      - uses: golangci/golangci-lint-action@v4
+          sudo apt -qy install libseccomp-dev
+      - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.54
+          version: v1.62
       # Extra linters, only checking new code from a pull request.
       - name: lint-extra
         if: github.event_name == 'pull_request'
         run: |
-          golangci-lint run --config .golangci-extra.yml --new-from-rev=HEAD~1 --out-format=github-actions
+          golangci-lint run --config .golangci-extra.yml --new-from-rev=HEAD~1
+
+  go-fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+      - name: install deps
+        run: |
+          sudo apt -q update
+          sudo apt -qy install libseccomp-dev
+      - name: run go fix
+        run: |
+          go fix ./...
+          git diff --exit-code
 
   compile-buildtags:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # Don't ignore C warnings. Note that the output of "go env CGO_CFLAGS" by default is "-g -O2", so we keep them.
       CGO_CFLAGS: -g -O2 -Werror
@@ -59,28 +76,34 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "${{ env.GO_VERSION }}"
+      - name: install deps
+        run: |
+          sudo apt update
+          sudo apt -y install libseccomp-dev
       - name: compile with no build tags
         run: make BUILDTAGS=""
+      - name: compile with runc_nocriu build tag
+        run: make EXTRA_BUILDTAGS="runc_nocriu"
 
   codespell:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: install deps
       # Version of codespell bundled with Ubuntu is way old, so use pip.
-      run: pip install codespell
+      run: pip install --break-system-packages codespell==v2.3.0
     - name: run codespell
       run: codespell
 
   shfmt:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: shfmt
       run: make shfmt
 
   shellcheck:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: install shellcheck
@@ -104,20 +127,21 @@ jobs:
         run : ./script/check-config.sh
 
   space-at-eol:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: rm -fr vendor
       - run: if git -P grep -I -n '\s$'; then echo "^^^ extra whitespace at EOL, please fix"; exit 1; fi
 
   deps:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
     - name: install go
       uses: actions/setup-go@v5
       with:
         go-version: "${{ env.GO_VERSION }}"
+        check-latest: true
     - name: verify deps
       run: make verify-dependencies
 
@@ -126,7 +150,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     # Only check commits on pull requests.
     if: github.event_name == 'pull_request'
     steps:
@@ -144,7 +168,7 @@ jobs:
           error: 'Subject too long (max 72)'
 
   cfmt:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - name: checkout
       uses: actions/checkout@v4
@@ -153,7 +177,7 @@ jobs:
     - name: install deps
       run: |
         sudo apt -qq update
-        sudo apt -qq install indent
+        sudo apt -qqy install indent
     - name: cfmt
       run: |
         make cfmt
@@ -162,7 +186,7 @@ jobs:
 
   release:
     timeout-minutes: 30
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - name: checkout
       uses: actions/checkout@v4
@@ -193,7 +217,7 @@ jobs:
 
 
   get-images:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4
       with:
@@ -216,3 +240,22 @@ jobs:
         cd tests/integration
         ./bootstrap-get-images.sh > get-images.sh
         git diff --exit-code
+
+  all-done:
+    needs:
+      - cfmt
+      - codespell
+      - commit
+      - compile-buildtags
+      - deps
+      - get-images
+      - go-fix
+      - keyring
+      - lint
+      - release
+      - shellcheck
+      - shfmt
+      - space-at-eol
+    runs-on: ubuntu-24.04
+    steps:
+    - run: echo "All jobs completed"

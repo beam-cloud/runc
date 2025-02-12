@@ -842,3 +842,38 @@ func TestValidateScheduler(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateIOPriority(t *testing.T) {
+	testCases := []struct {
+		isErr    bool
+		priority int
+		class    specs.IOPriorityClass
+	}{
+		{isErr: false, priority: 0, class: specs.IOPRIO_CLASS_IDLE},
+		{isErr: false, priority: 7, class: specs.IOPRIO_CLASS_RT},
+		{isErr: false, priority: 3, class: specs.IOPRIO_CLASS_BE},
+		// Invalid priority.
+		{isErr: true, priority: -1, class: specs.IOPRIO_CLASS_BE},
+		// Invalid class.
+		{isErr: true, priority: 3, class: specs.IOPriorityClass("IOPRIO_CLASS_WOW")},
+	}
+
+	for _, tc := range testCases {
+		ioPriroty := configs.IOPriority{
+			Priority: tc.priority,
+			Class:    tc.class,
+		}
+		config := &configs.Config{
+			Rootfs:     "/var",
+			IOPriority: &ioPriroty,
+		}
+
+		err := Validate(config)
+		if tc.isErr && err == nil {
+			t.Errorf("iopriority: %d, expected error, got nil", tc.priority)
+		}
+		if !tc.isErr && err != nil {
+			t.Errorf("iopriority: %d, expected nil, got error %v", tc.priority, err)
+		}
+	}
+}
