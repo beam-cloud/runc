@@ -42,6 +42,10 @@ using the runc checkpoint command.`,
 			Usage: "skip in-flight tcp connections",
 		},
 		cli.BoolFlag{
+			Name:  "link-remap",
+			Usage: "allow one to link unlinked files back when possible",
+		},
+		cli.BoolFlag{
 			Name:  "ext-unix-sk",
 			Usage: "allow external unix sockets",
 		},
