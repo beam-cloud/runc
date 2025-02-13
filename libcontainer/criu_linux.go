@@ -685,8 +685,6 @@ func (c *Container) Restore(process *Process, criuOpts *CriuOpts) error {
 			ShellJob:          proto.Bool(criuOpts.ShellJob),
 			ExtUnixSk:         proto.Bool(criuOpts.ExternalUnixConnections),
 			TcpEstablished:    proto.Bool(criuOpts.TcpEstablished),
-			TcpSkipInFlight:   proto.Bool(criuOpts.TcpSkipInFlight),
-			LinkRemap:         proto.Bool(criuOpts.LinkRemap),
 			FileLocks:         proto.Bool(criuOpts.FileLocks),
 			EmptyNs:           proto.Uint32(criuOpts.EmptyNs),
 			OrphanPtsMaster:   proto.Bool(true),
