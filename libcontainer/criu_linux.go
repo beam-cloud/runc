@@ -690,6 +690,7 @@ func (c *Container) Restore(process *Process, criuOpts *CriuOpts) error {
 			OrphanPtsMaster:   proto.Bool(true),
 			AutoDedup:         proto.Bool(criuOpts.AutoDedup),
 			LazyPages:         proto.Bool(criuOpts.LazyPages),
+			MntnsCompatMode:   proto.Bool(true),
 		},
 	}
 
