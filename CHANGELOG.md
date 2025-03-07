@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0-rc.1] - 2025-03-04
+
+> No tengo miedo al invierno, con tu recuerdo lleno de sol.
+
 ### libcontainer API
  * `configs.CommandHook` struct has changed, Command is now a pointer.
    Also, `configs.NewCommandHook` now accepts a `*Command`. (#4325)
@@ -16,12 +20,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    user previously relied on this feature, now they have to convert names to
    IDs before calling libcontainer; it is recommended to use Go package
    github.com/moby/sys/user for that. (#3999)
+ * Move libcontainer/cgroups to a separate repository. (#4618)
 
 ### Fixed
  * `runc exec -p` no longer ignores specified `ioPriority` and `scheduler`
    settings. Similarly, libcontainer's `Container.Start` and `Container.Run`
    methods no longer ignore `Process.IOPriority` and `Process.Scheduler`
    settings. (#4585)
+ * We no longer use `F_SEAL_FUTURE_WRITE` when sealing the runc binary, as it
+   turns out this had some unfortunate bugs in older kernel versions and was
+   never necessary in the first place. (#4641, #4640)
+ * runc now uses a more flexible method of joining namespaces, which better
+   matches the behaviour of `nsenter(8)`. This is mainly useful for users that
+   create a container with a runc-managed user namespace but want the container
+   to join some externally-managed namespace as well. (#4492)
+ * `runc` now properly handles joining time namespaces (such as with `runc
+   exec`). Previously we would attempt to set the time offsets when joining,
+   which would fail. (#4635, #4636)
+ * Handle `EINTR` retries correctly for socket-related direct
+   `golang.org/x/sys/unix` system calls. (#4637)
+ * Handle `close_range(2)` errors more gracefully. (#4596)
+ * Fix a stall issue that would happen if setting `O_CLOEXEC` with
+   `CloseExecFrom` failed (#4599).
+ * Handle errors on older kernels when resetting ambient capabilities more
+   gracefully. (#4597)
+
+### Changed
+ * runc now has an official release policy to help provide more consistency
+   around our release schedules and better define our support policy for old
+   release branches. See `RELEASES.md` for more details. (#4557)
+ * Improved performance by switching to `strings.Cut` where appropriate.
+   (#4470)
+ * The minimum Go version of runc is now Go 1.23. (#4598)
+ * Updated builds to libseccomp v2.5.6. (#4625)
+
+### Added
+ * runc has been updated to support OCI runtime-spec 1.2.1. (#4653)
+ * CPU affinity support for `runc exec`. (#4327)
+ * CRIU support can be disabled using the build tag `runc_nocriu`. (#4546)
+ * Support to get the pidfd of the container via CLI flag `pidfd-socket`.
+   (#4045)
+ * Support `skip-in-flight` and `link-remap` options for CRIU. (#4627)
+ * Support cgroup v1 mounted with `noprefix`. (#4513)
+
+## [1.2.5] - 2025-02-13
+
+> Мороз и солнце; день чудесный!
+
+### Fixed
+* There was a regression in systemd v230 which made the way we define device
+  rule restrictions require a systemctl daemon-reload for our transient
+  units. This caused issues for workloads using NVIDIA GPUs. Workaround the
+  upstream regression by re-arranging how the unit properties are defined.
+  (#4568, #4612, #4615)
+ * Dependency github.com/cyphar/filepath-securejoin is updated to v0.4.1,
+   allowing projects that vendor runc to bump it as well. (#4608)
+ * CI: fixed criu-dev compilation. (#4611)
+
+### Changed
+ * Dependency golang.org/x/net is updated to 0.33.0. (#4632)
+
+## [1.2.4] - 2025-01-07
+
+> Христос се роди!
+
+### Fixed
+ * Re-add tun/tap devices to built-in allowed devices lists.
+
+   In runc 1.2.0 we removed these devices from the default allow-list (which
+   were added seemingly by accident early in Docker's history) as a precaution
+   in order to try to reduce the attack surface of device inodes available to
+   most containers (#3468). At the time we thought that the vast majority of
+   users using tun/tap would already be specifying what devices they need (such
+   as by using `--device` with Docker/Podman) as opposed to doing the `mknod`
+   manually, and thus there would've been no user-visible change.
+
+   Unfortunately, it seems that this regressed a noticeable number of users
+   (and not all higher-level tools provide easy ways to specify devices to
+   allow) and so this change needed to be reverted. Users that do not need
+   these devices are recommended to explicitly disable them by adding deny
+   rules in their container configuration. (#4555, #4556)
+
+## [1.2.3] - 2024-12-12
+
+> Winter is not a season, it's a celebration.
+
+### Fixed
+ * Fixed a regression in use of securejoin.MkdirAll, where multiple
+   runc processes racing to create the same mountpoint in a shared rootfs
+   would result in spurious EEXIST errors. In particular, this regression
+   caused issues with BuildKit. (#4543, #4550)
+ * Fixed a regression in eBPF support for pre-5.6 kernels after upgrading
+   Cilium's eBPF library version to 0.16 in runc. (#3008, #4548, #4551)
+
+## [1.2.2] - 2024-11-15
+
+> Specialization is for insects.
+
+### Fixed
+ * Fixed the failure of `runc delete` on a rootless container with no
+   dedicated cgroup on a system with read-only `/sys/fs/cgroup` mount.
+   This is a regression in runc 1.2.0, causing a failure when using
+   rootless buildkit. (#4518, #4531)
+ * Using runc on a system where /run/runc and /usr/bin are on different
+   filesystems no longer results in harmless but annoying messages
+   ("overlayfs: "xino" feature enabled using 3 upper inode bits")
+   appearing in the kernel log. (#4508, #4530)
+
+### Changed
+ * Better memfd-bind documentation. (#4530)
+ * CI: bump Fedora 40 -> 41. (#4528)
+
+## [1.2.1] - 2024-11-01
+
+>  No existe una escuela que enseñe a vivir.
+
+### Fixed
+ * Became root after joining an existing user namespace. Otherwise, runc
+   won't have permissions to configure some mounts when running under
+   SELinux and runc is not creating the user namespace. (#4466, #4477)
+
+### Removed
+ * Remove dependency on `golang.org/x/sys/execabs` from go.mod. (#4480)
+ * Remove runc-dmz, that had many limitations, and is mostly made obsolete by
+   the new protection mechanism added in v1.2.0. Note that runc-dmz was only
+   available only in the 1.2.0 release and required to set an environment variable
+   to opt-in. (#4488)
+
+### Added
+ * The `script/check-config.sh` script now checks for overlayfs support. (#4494)
+ * When using cgroups v2, allow to set or update memory limit to "unlimited"
+   and swap limit to a specific value. (#4501)
 
 ## [1.2.0] - 2024-10-22
 
@@ -886,7 +1015,7 @@ implementation (libcontainer) is *not* covered by this policy.
    cgroups at all during `runc update`). (#2994)
 
 <!-- minor releases -->
-[Unreleased]: https://github.com/opencontainers/runc/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/opencontainers/runc/compare/v1.3.0-rc.1...HEAD
 [1.2.0]: https://github.com/opencontainers/runc/compare/v1.2.0-rc.1...v1.2.0
 [1.1.0]: https://github.com/opencontainers/runc/compare/v1.1.0-rc.1...v1.1.0
 [1.0.0]: https://github.com/opencontainers/runc/releases/tag/v1.0.0
@@ -917,7 +1046,15 @@ implementation (libcontainer) is *not* covered by this policy.
 [1.1.0-rc.1]: https://github.com/opencontainers/runc/compare/v1.0.0...v1.1.0-rc.1
 
 <!-- 1.2.z patch releases -->
-[Unreleased 1.2.z]: https://github.com/opencontainers/runc/compare/v1.2.0...release-1.2
+[Unreleased 1.2.z]: https://github.com/opencontainers/runc/compare/v1.2.5...release-1.2
+[1.2.5]: https://github.com/opencontainers/runc/compare/v1.2.4...v1.2.5
+[1.2.4]: https://github.com/opencontainers/runc/compare/v1.2.3...v1.2.4
+[1.2.3]: https://github.com/opencontainers/runc/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/opencontainers/runc/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/opencontainers/runc/compare/v1.2.0...v1.2.1
 [1.2.0-rc.3]: https://github.com/opencontainers/runc/compare/v1.2.0-rc.2...v1.2.0-rc.3
 [1.2.0-rc.2]: https://github.com/opencontainers/runc/compare/v1.2.0-rc.1...v1.2.0-rc.2
 [1.2.0-rc.1]: https://github.com/opencontainers/runc/compare/v1.1.0...v1.2.0-rc.1
+
+<!-- 1.3.z patch releases -->
+[1.3.0-rc.1]: https://github.com/opencontainers/runc/compare/v1.2.0...v1.3.0-rc.1

@@ -20,7 +20,7 @@ import (
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 
-	"github.com/opencontainers/runc/libcontainer/cgroups"
+	"github.com/opencontainers/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/exeseal"
 	"github.com/opencontainers/runc/libcontainer/intelrdt"
@@ -709,6 +709,7 @@ func (c *Container) newInitConfig(process *Process) *initConfig {
 		Rlimits:          c.config.Rlimits,
 		IOPriority:       c.config.IOPriority,
 		Scheduler:        c.config.Scheduler,
+		CPUAffinity:      c.config.ExecCPUAffinity,
 		CreateConsole:    process.ConsoleSocket != nil,
 		ConsoleWidth:     process.ConsoleWidth,
 		ConsoleHeight:    process.ConsoleHeight,
@@ -736,6 +737,9 @@ func (c *Container) newInitConfig(process *Process) *initConfig {
 	}
 	if process.Scheduler != nil {
 		cfg.Scheduler = process.Scheduler
+	}
+	if process.CPUAffinity != nil {
+		cfg.CPUAffinity = process.CPUAffinity
 	}
 
 	// Set misc properties.

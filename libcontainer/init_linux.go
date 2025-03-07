@@ -19,8 +19,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"github.com/opencontainers/cgroups"
 	"github.com/opencontainers/runc/libcontainer/capabilities"
-	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/utils"
@@ -83,6 +83,7 @@ type initConfig struct {
 	Rlimits         []configs.Rlimit      `json:"rlimits"`
 	IOPriority      *configs.IOPriority   `json:"io_priority,omitempty"`
 	Scheduler       *configs.Scheduler    `json:"scheduler,omitempty"`
+	CPUAffinity     *configs.CPUAffinity  `json:"cpu_affinity,omitempty"`
 
 	// Miscellaneous properties, filled in by [Container.newInitConfig]
 	// unless documented otherwise.
