@@ -84,6 +84,12 @@ func newProcess(p *specs.Process) (*libcontainer.Process, error) {
 		}
 		lp.Rlimits = append(lp.Rlimits, rl)
 	}
+	aff, err := configs.ConvertCPUAffinity(p.ExecCPUAffinity)
+	if err != nil {
+		return nil, err
+	}
+	lp.CPUAffinity = aff
+
 	return lp, nil
 }
 
@@ -246,7 +252,7 @@ func (r *runner) run(config *specs.Process) (int, error) {
 	// Setting up IO is a two stage process. We need to modify process to deal
 	// with detaching containers, and then we get a tty after the container has
 	// started.
-	handler := newSignalHandler(r.enableSubreaper, r.notifySocket)
+	handlerCh := newSignalHandler(r.enableSubreaper, r.notifySocket)
 	tty, err := setupIO(process, r.container, config.Terminal, detach, r.consoleSocket)
 	if err != nil {
 		return -1, err
@@ -285,6 +291,7 @@ func (r *runner) run(config *specs.Process) (int, error) {
 			return -1, err
 		}
 	}
+	handler := <-handlerCh
 	status, err := handler.forward(process, tty, detach)
 	if err != nil {
 		r.terminate(process)

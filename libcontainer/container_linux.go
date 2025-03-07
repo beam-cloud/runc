@@ -20,9 +20,9 @@ import (
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 
-	"github.com/opencontainers/runc/libcontainer/cgroups"
+	"github.com/opencontainers/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
-	"github.com/opencontainers/runc/libcontainer/dmz"
+	"github.com/opencontainers/runc/libcontainer/exeseal"
 	"github.com/opencontainers/runc/libcontainer/intelrdt"
 	"github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/utils"
@@ -496,7 +496,7 @@ func (c *Container) newParentProcess(p *Process) (parentProcess, error) {
 		exePath string
 		safeExe *os.File
 	)
-	if dmz.IsSelfExeCloned() {
+	if exeseal.IsSelfExeCloned() {
 		// /proc/self/exe is already a cloned binary -- no need to do anything
 		logrus.Debug("skipping binary cloning -- /proc/self/exe is already cloned!")
 		// We don't need to use /proc/thread-self here because the exe mm of a
@@ -505,13 +505,13 @@ func (c *Container) newParentProcess(p *Process) (parentProcess, error) {
 		exePath = "/proc/self/exe"
 	} else {
 		var err error
-		safeExe, err = dmz.CloneSelfExe(c.stateDir)
+		safeExe, err = exeseal.CloneSelfExe(c.stateDir)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create safe /proc/self/exe clone for runc init: %w", err)
 		}
 		exePath = "/proc/self/fd/" + strconv.Itoa(int(safeExe.Fd()))
 		p.clonedExes = append(p.clonedExes, safeExe)
-		logrus.Debug("runc-dmz: using /proc/self/exe clone") // used for tests
+		logrus.Debug("runc exeseal: using /proc/self/exe clone") // used for tests
 	}
 
 	cmd := exec.Command(exePath, "init")
@@ -689,6 +689,9 @@ func (c *Container) newSetnsProcess(p *Process, cmd *exec.Cmd, comm *processComm
 }
 
 func (c *Container) newInitConfig(process *Process) *initConfig {
+	// Set initial properties. For those properties that exist
+	// both in the container config and the process, use the ones
+	// from the container config first, and override them later.
 	cfg := &initConfig{
 		Config:           c.config,
 		Args:             process.Args,
@@ -697,18 +700,25 @@ func (c *Container) newInitConfig(process *Process) *initConfig {
 		GID:              process.GID,
 		AdditionalGroups: process.AdditionalGroups,
 		Cwd:              process.Cwd,
-		Capabilities:     process.Capabilities,
+		Capabilities:     c.config.Capabilities,
 		PassedFilesCount: len(process.ExtraFiles),
 		ContainerID:      c.ID(),
 		NoNewPrivileges:  c.config.NoNewPrivileges,
-		RootlessEUID:     c.config.RootlessEUID,
-		RootlessCgroups:  c.config.RootlessCgroups,
 		AppArmorProfile:  c.config.AppArmorProfile,
 		ProcessLabel:     c.config.ProcessLabel,
 		Rlimits:          c.config.Rlimits,
+		IOPriority:       c.config.IOPriority,
+		Scheduler:        c.config.Scheduler,
+		CPUAffinity:      c.config.ExecCPUAffinity,
 		CreateConsole:    process.ConsoleSocket != nil,
 		ConsoleWidth:     process.ConsoleWidth,
 		ConsoleHeight:    process.ConsoleHeight,
+	}
+
+	// Overwrite config properties with ones from process.
+
+	if process.Capabilities != nil {
+		cfg.Capabilities = process.Capabilities
 	}
 	if process.NoNewPrivileges != nil {
 		cfg.NoNewPrivileges = *process.NoNewPrivileges
@@ -722,6 +732,18 @@ func (c *Container) newInitConfig(process *Process) *initConfig {
 	if len(process.Rlimits) > 0 {
 		cfg.Rlimits = process.Rlimits
 	}
+	if process.IOPriority != nil {
+		cfg.IOPriority = process.IOPriority
+	}
+	if process.Scheduler != nil {
+		cfg.Scheduler = process.Scheduler
+	}
+	if process.CPUAffinity != nil {
+		cfg.CPUAffinity = process.CPUAffinity
+	}
+
+	// Set misc properties.
+
 	if cgroups.IsCgroup2UnifiedMode() {
 		cfg.Cgroup2Path = c.cgroupManager.Path("")
 	}
@@ -1128,8 +1150,9 @@ func (c *Container) bootstrapData(cloneFlags uintptr, nsMaps map[configs.Namespa
 		Value: c.config.RootlessEUID,
 	})
 
-	// write boottime and monotonic time ns offsets.
-	if c.config.TimeOffsets != nil {
+	// write boottime and monotonic time ns offsets only when we are not joining an existing time ns
+	_, joinExistingTime := nsMaps[configs.NEWTIME]
+	if !joinExistingTime && c.config.TimeOffsets != nil {
 		var offsetSpec bytes.Buffer
 		for clock, offset := range c.config.TimeOffsets {
 			fmt.Fprintf(&offsetSpec, "%s %d %d\n", clock, offset.Secs, offset.Nanosecs)
