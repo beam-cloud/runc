@@ -49,6 +49,10 @@ using the runc checkpoint command.`,
 			Name:  "file-locks",
 			Usage: "handle file locks, for safety",
 		},
+		cli.BoolFlag{
+			Name:  "link-remap",
+			Usage: "remap links",
+		},
 		cli.StringFlag{
 			Name:  "manage-cgroups-mode",
 			Value: "",
