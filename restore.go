@@ -54,6 +54,10 @@ using the runc checkpoint command.`,
 			Value: "",
 			Usage: "cgroups mode: soft|full|strict|ignore (default: soft)",
 		},
+		cli.BoolFlag{
+			Name:  "link-remap",
+			Usage: "remap links",
+		},
 		cli.StringFlag{
 			Name:  "bundle, b",
 			Value: "",
