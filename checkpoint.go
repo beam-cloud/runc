@@ -125,6 +125,7 @@ func criuOptions(context *cli.Context) (*libcontainer.CriuOpts, error) {
 		LeaveRunning:            context.Bool("leave-running"),
 		TcpEstablished:          context.Bool("tcp-established"),
 		TcpSkipInFlight:         context.Bool("tcp-skip-in-flight"),
+		TcpClose:                context.Bool("tcp-close"),
 		LinkRemap:               context.Bool("link-remap"),
 		ExternalUnixConnections: context.Bool("ext-unix-sk"),
 		ShellJob:                context.Bool("shell-job"),
