@@ -37,9 +37,8 @@ using the runc checkpoint command.`,
 			Name:  "tcp-established",
 			Usage: "allow open tcp connections",
 		},
-		cli.StringFlag{
+		cli.BoolFlag{
 			Name:  "tcp-close",
-			Value: "",
 			Usage: "close open tcp connections on restore",
 		},
 		cli.BoolFlag{
